@@ -1,6 +1,14 @@
-import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef } from 'react';
-import { SearchIntent, SEOInput } from '../types';
-import { Type, AlignLeft, Globe, FileText, Tag, Hash, Bold, Italic, List, ListOrdered, Image as ImageIcon, Code, Eye, Link as LinkIcon, Unlink, ExternalLink, Zap } from 'lucide-react';
+
+import React, { useRef, useState, useImperativeHandle, forwardRef, useMemo, useEffect } from 'react';
+import { SearchIntent, SEOInput, ContentTaxonomy } from '../types';
+import { analyzeContent } from '../services/seoEngine';
+import { optimizeContent } from '../services/gemini';
+import { 
+  Type, Globe, FileText, Tag, Hash, AlignLeft, Layers, Target, 
+  Compass, Zap, Sparkles, Eye, History, FileEdit, Check, Copy, 
+  Loader2, Bold, Italic, Link as LinkIcon, Image as ImageIcon, 
+  Heading2, Heading3, X, ExternalLink, ShieldCheck, DollarSign
+} from 'lucide-react';
 
 interface Props {
   data: SEOInput;
@@ -11,666 +19,324 @@ export interface InputSectionHandle {
   focusField: (id: string) => void;
 }
 
-// Helper to generate Vietnamese slug
 const generateSlug = (text: string) => {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[đĐ]/g, "d")
-    .replace(/[^a-z0-9\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-");
+  return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[đĐ]/g, "d").replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-");
 };
 
-const GENERIC_ANCHORS = [
-    'tại đây', 'tai day', 'xem tại đây', 'xem tai day', 'bấm vào đây', 'bam vao day', 
-    'click here', 'click tại đây', 'xem thêm', 'xem them', 'chi tiết', 'chi tiet', 
-    'đọc thêm', 'doc them', 'link', 'trang này'
-];
-
-// --- Rich Text Editor Component ---
-interface RichTextHandle {
-    findAndHighlight: (type: string) => void;
-}
-
-const RichTextEditor = forwardRef<RichTextHandle, { value: string, onChange: (val: string) => void, focusKeyword: string }>(({ value, onChange, focusKeyword }, ref) => {
-  const [mode, setMode] = useState<'visual' | 'code'>('visual');
-  const [currentLink, setCurrentLink] = useState<string | null>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-  const isInternalUpdate = useRef(false);
-
-  // Helper to remove temporary highlights
-  const removeHighlights = () => {
-      if (!contentRef.current) return;
-      const spans = contentRef.current.querySelectorAll('.seo-highlight-temp');
-      spans.forEach(span => {
-          const parent = span.parentNode;
-          if (parent) {
-              parent.replaceChild(document.createTextNode(span.textContent || ''), span);
-              parent.normalize();
-          }
-      });
-      // Remove any existing toasts
-      const toasts = contentRef.current.parentElement?.querySelectorAll('.highlight-toast');
-      toasts?.forEach(t => t.remove());
-  };
-
-  // Expose highlight method
-  useImperativeHandle(ref, () => ({
-    findAndHighlight: (type: string) => {
-        if (mode !== 'visual') setMode('visual');
-        
-        // Small timeout to allow mode switch to render contentRef
-        setTimeout(() => {
-            const container = contentRef.current;
-            if (!container) return;
-
-            let target: Element | null = null;
-            let selectContent = false;
-            const totalTextLen = container.innerText.length;
-
-            // Helper to flash element red
-            const flashElement = (el: HTMLElement) => {
-                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                el.style.transition = 'all 0.5s ease';
-                el.style.backgroundColor = '#fecaca'; // Red-200
-                el.style.boxShadow = '0 0 0 4px #fecaca';
-                setTimeout(() => {
-                    el.style.backgroundColor = '';
-                    el.style.boxShadow = '';
-                }, 2000);
-            };
-
-            if (type === 'key-density') {
-                if (!focusKeyword.trim()) {
-                    alert('Vui lòng nhập từ khóa chính trước.');
-                    return;
-                }
-                
-                removeHighlights(); // Clean up old ones
-
-                // TreeWalker to find text nodes matches
-                const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
-                const nodesToReplace: {node: Text, matchIndices: number[]}[] = [];
-                const lowerKey = focusKeyword.toLowerCase();
-                
-                let node: Node | null;
-                let count = 0;
-
-                while(node = walker.nextNode()) {
-                    const text = node.textContent || '';
-                    const lowerText = text.toLowerCase();
-                    let index = lowerText.indexOf(lowerKey);
-                    const indices = [];
-                    while (index !== -1) {
-                        indices.push(index);
-                        count++;
-                        index = lowerText.indexOf(lowerKey, index + 1);
-                    }
-                    if (indices.length > 0) {
-                        nodesToReplace.push({ node: node as Text, matchIndices: indices });
-                    }
-                }
-
-                if (count === 0) {
-                    alert(`Không tìm thấy từ khóa "${focusKeyword}" trong bài.`);
-                    return;
-                }
-
-                // Apply highlights
-                const wrappers: HTMLElement[] = [];
-                nodesToReplace.forEach(({ node, matchIndices }) => {
-                    const text = node.textContent || '';
-                    const fragment = document.createDocumentFragment();
-                    let lastIndex = 0;
-
-                    matchIndices.forEach(idx => {
-                        fragment.appendChild(document.createTextNode(text.substring(lastIndex, idx)));
-                        
-                        const span = document.createElement('span');
-                        span.className = 'seo-highlight-temp';
-                        span.style.backgroundColor = '#fde047'; // yellow-300
-                        span.style.fontWeight = '700';
-                        span.style.borderRadius = '2px';
-                        span.style.padding = '0 2px';
-                        span.style.boxShadow = '0 0 0 1px #eab308';
-                        span.style.transition = 'all 0.5s';
-                        span.textContent = text.substr(idx, focusKeyword.length);
-                        fragment.appendChild(span);
-                        wrappers.push(span);
-
-                        lastIndex = idx + focusKeyword.length;
-                    });
-                    fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-                    node.parentNode?.replaceChild(fragment, node);
-                });
-
-                // Scroll to first match
-                if (wrappers.length > 0) {
-                    wrappers[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }
-
-                // Show Toast count
-                const toast = document.createElement('div');
-                toast.textContent = `Tìm thấy ${count} lần xuất hiện "${focusKeyword}"`;
-                toast.className = 'highlight-toast absolute top-14 right-4 bg-blue-600 text-white text-xs font-bold px-3 py-2 rounded shadow-lg animate-in fade-in slide-in-from-top-2 z-20';
-                container.parentElement?.appendChild(toast);
-
-                // Auto remove after 4 seconds
-                setTimeout(() => {
-                    wrappers.forEach(w => {
-                        w.style.backgroundColor = 'transparent';
-                        w.style.boxShadow = 'none';
-                        w.style.fontWeight = 'normal';
-                    });
-                    toast.style.opacity = '0';
-                    
-                    setTimeout(() => {
-                        removeHighlights();
-                        // Sync cleaned HTML back to state
-                        onChange(container.innerHTML);
-                    }, 500);
-                }, 4000);
-
-                return; // Stop other checks
-            }
-
-            if (type === 'read-para') {
-                // Find paragraph > 150 words
-                const blocks = container.querySelectorAll('p, div, li');
-                for (const block of blocks) {
-                    if ((block.textContent || '').trim().split(/\s+/).length > 150) {
-                        target = block;
-                        selectContent = true;
-                        break;
-                    }
-                }
-            } else if (type === 'headings') {
-                target = container.querySelector('h1, h2, h3, h4, h5, h6');
-                if (target) selectContent = true;
-            } else if (type === 'key-intro') {
-                target = container.querySelector('p, div');
-                if (target) selectContent = true;
-            } else if (type === 'link-anchor') {
-                // Find generic anchors
-                const links = container.querySelectorAll('a');
-                for (const link of links) {
-                    const text = (link.textContent || '').toLowerCase().trim();
-                    if (GENERIC_ANCHORS.some(g => text === g || text.includes(g))) {
-                        target = link;
-                        selectContent = true;
-                        break;
-                    }
-                }
-            } else if (type === 'link-pos-int' || type === 'link-pos-ext') {
-                 // Find links in "Intro" (First 15% of height/text approximation)
-                 const links = container.querySelectorAll('a');
-                 
-                 for (const link of links) {
-                    const href = link.getAttribute('href') || '';
-                    const isInternal = href.startsWith('/') || href.startsWith('#') || href.startsWith('.');
-                    
-                    if (type === 'link-pos-int' && isInternal) {
-                         target = link;
-                         selectContent = true;
-                         break; 
-                    }
-                    if (type === 'link-pos-ext' && !isInternal) {
-                         target = link;
-                         selectContent = true;
-                         break;
-                    }
-                 }
-            } else if (type === 'read-list') {
-                target = container;
-            } else {
-                target = container;
-            }
-
-            // Fallback if specific target not found
-            if (!target) target = container;
-
-            // Highlight Logic
-            if (target instanceof HTMLElement && target !== container) {
-                flashElement(target);
-                
-                // Also select it for editing
-                const selection = window.getSelection();
-                const range = document.createRange();
-                range.selectNodeContents(target);
-                if (selection) {
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                }
-                container.focus();
-            } else {
-                 target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                 container.focus();
-            }
-            
-        }, 100);
-    }
-  }));
-
-  // Sync value to contentEditable when value changes externally (and not currently typing)
-  useEffect(() => {
-    if (mode === 'visual' && contentRef.current) {
-        // Only update if significantly different to avoid cursor jumps, 
-        // OR if value changed externally.
-        // Simple check: compare innerHTML
-        if (contentRef.current.innerHTML !== value) {
-            // Check if we are focusing it? No, just update if not focusing.
-            if (document.activeElement !== contentRef.current) {
-                 contentRef.current.innerHTML = value;
-            }
-        }
-    }
-  }, [value, mode]);
-
-  const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
-    isInternalUpdate.current = true;
-    const html = e.currentTarget.innerHTML;
-    onChange(html);
-    isInternalUpdate.current = false;
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
-    // STOP default browser paste which can be unpredictable with HTML
-    e.preventDefault();
-
-    // 1. Try to get HTML content (Rich Text)
-    const htmlData = e.clipboardData.getData('text/html');
-    
-    // 2. Try to get Plain Text
-    const textData = e.clipboardData.getData('text/plain');
-
-    if (htmlData) {
-        // Parse the HTML to extract the body content cleanly
-        // This removes the <html><body> wrapper often included by browsers/Word
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlData, 'text/html');
-        const cleanContent = doc.body.innerHTML;
-
-        // Insert the HTML. This PRESERVES <a> tags, href, target, rel, etc.
-        // It does NOT flatten links to text like (url).
-        document.execCommand('insertHTML', false, cleanContent);
-    } else if (textData) {
-        // Fallback: Insert plain text
-        document.execCommand('insertText', false, textData);
-    }
-  };
-
-  const checkLinkStatus = () => {
-      const selection = window.getSelection();
-      if (!selection?.anchorNode) {
-          setCurrentLink(null);
-          return;
-      }
-      
-      let node: Node | null = selection.anchorNode;
-      // Handle text nodes
-      if (node.nodeType === 3) node = node.parentNode;
-      
-      const linkNode = (node as HTMLElement)?.closest('a');
-      if (linkNode && contentRef.current?.contains(linkNode)) {
-          setCurrentLink(linkNode.getAttribute('href'));
-      } else {
-          setCurrentLink(null);
-      }
-  };
-
-  const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
-      const target = e.target as HTMLElement;
-      const link = target.closest('a');
-      
-      // Ctrl/Cmd + Click to open
-      if (link && (e.ctrlKey || e.metaKey)) {
-          const href = link.getAttribute('href');
-          if (href) window.open(href, '_blank');
-      }
-      
-      checkLinkStatus();
-  };
-
-  const applyFormat = (command: string, val?: string) => {
-    document.execCommand(command, false, val);
-    if (contentRef.current) {
-        onChange(contentRef.current.innerHTML);
-        contentRef.current.focus();
-    }
-    checkLinkStatus();
-  };
-
-  const addLink = () => {
-    const url = window.prompt('Nhập liên kết (URL):', 'https://');
-    if (url) {
-      applyFormat('createLink', url);
-    }
-  };
-
-  const removeLink = () => {
-      applyFormat('unlink');
-  };
-
-  const autoBoldKeywords = () => {
-    if (!focusKeyword.trim()) {
-        alert('Vui lòng nhập từ khóa chính trước.');
-        return;
-    }
-    if (!contentRef.current) return;
-
-    // Use a clean slate (remove temp highlights first if any)
-    removeHighlights();
-
-    const container = contentRef.current;
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
-    const nodesToReplace: {node: Text, matchIndices: number[]}[] = [];
-    const lowerKey = focusKeyword.toLowerCase();
-    
-    let node: Node | null;
-    let count = 0;
-
-    while(node = walker.nextNode()) {
-        const parent = node.parentElement;
-        // Skip if already bold/strong
-        if (parent && (parent.tagName === 'B' || parent.tagName === 'STRONG')) continue;
-
-        const text = node.textContent || '';
-        const lowerText = text.toLowerCase();
-        let index = lowerText.indexOf(lowerKey);
-        const indices = [];
-        while (index !== -1) {
-            indices.push(index);
-            count++;
-            index = lowerText.indexOf(lowerKey, index + 1);
-        }
-        if (indices.length > 0) {
-            nodesToReplace.push({ node: node as Text, matchIndices: indices });
-        }
-    }
-
-    if (count === 0) {
-        alert(`Không tìm thấy từ khóa "${focusKeyword}" chưa được in đậm.`);
-        return;
-    }
-
-    nodesToReplace.forEach(({ node, matchIndices }) => {
-        const text = node.textContent || '';
-        const fragment = document.createDocumentFragment();
-        let lastIndex = 0;
-
-        matchIndices.forEach(idx => {
-            fragment.appendChild(document.createTextNode(text.substring(lastIndex, idx)));
-            
-            const strong = document.createElement('strong');
-            strong.textContent = text.substr(idx, focusKeyword.length);
-            fragment.appendChild(strong);
-
-            lastIndex = idx + focusKeyword.length;
-        });
-        fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-        node.parentNode?.replaceChild(fragment, node);
-    });
-
-    onChange(container.innerHTML);
-    alert(`Đã tự động in đậm ${count} từ khóa "${focusKeyword}".`);
-  };
-
-  return (
-    <div className="border border-slate-300 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-blue-500 transition-all flex flex-col flex-grow min-h-[400px]">
-        {/* Toolbar */}
-        <div className="bg-slate-50 border-b border-slate-200 p-2 flex items-center gap-1 flex-wrap">
-            <div className="flex bg-slate-200 p-1 rounded-md mr-2">
-                <button 
-                    onClick={() => setMode('visual')} 
-                    className={`px-2 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-all ${mode==='visual' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}
-                >
-                    <Eye className="w-3 h-3" /> Visual
-                </button>
-                <button 
-                    onClick={() => setMode('code')} 
-                    className={`px-2 py-1 rounded text-xs font-semibold flex items-center gap-1 transition-all ${mode==='code' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-800'}`}
-                >
-                    <Code className="w-3 h-3" /> HTML
-                </button>
-            </div>
-            
-            <div className="w-px h-5 bg-slate-300 mx-1"></div>
-            
-            {mode === 'visual' ? (
-                <>
-                    <button onClick={() => applyFormat('bold')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Bold (In đậm)">
-                        <Bold className="w-4 h-4"/>
-                    </button>
-                    <button onClick={() => applyFormat('italic')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Italic (In nghiêng)">
-                        <Italic className="w-4 h-4"/>
-                    </button>
-                    <div className="w-px h-4 bg-slate-300 mx-1"></div>
-                    <button onClick={() => applyFormat('formatBlock', 'H2')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 font-bold text-xs w-8" title="Heading 2">
-                        H2
-                    </button>
-                    <button onClick={() => applyFormat('formatBlock', 'H3')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 font-bold text-xs w-8" title="Heading 3">
-                        H3
-                    </button>
-                    <div className="w-px h-4 bg-slate-300 mx-1"></div>
-                    <button onClick={addLink} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Chèn Link">
-                        <LinkIcon className="w-4 h-4 text-blue-600"/>
-                    </button>
-                     <button onClick={removeLink} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Gỡ Link">
-                        <Unlink className="w-4 h-4"/>
-                    </button>
-                    <div className="w-px h-4 bg-slate-300 mx-1"></div>
-                    <button onClick={() => applyFormat('insertUnorderedList')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Bullet List (Danh sách)">
-                        <List className="w-4 h-4"/>
-                    </button>
-                    <button onClick={() => applyFormat('insertOrderedList')} className="p-1.5 hover:bg-white hover:shadow rounded text-slate-700 transition-all" title="Numbered List (Số thứ tự)">
-                        <ListOrdered className="w-4 h-4"/>
-                    </button>
-                    <div className="w-px h-4 bg-slate-300 mx-1"></div>
-                    <button onClick={autoBoldKeywords} className="p-1.5 hover:bg-white hover:shadow rounded text-yellow-600 transition-all flex items-center gap-1" title="Tự động In đậm từ khóa chính">
-                        <Zap className="w-4 h-4 fill-yellow-500"/>
-                    </button>
-                    
-                    {currentLink && (
-                        <div className="ml-auto flex items-center gap-2 bg-blue-50 text-blue-700 px-2 py-1 rounded text-xs border border-blue-100 animate-in fade-in">
-                            <span className="max-w-[150px] truncate" title={currentLink}>{currentLink}</span>
-                            <a href={currentLink} target="_blank" rel="noreferrer" className="flex items-center gap-1 font-bold hover:underline">
-                                Mở <ExternalLink size={12} />
-                            </a>
-                        </div>
-                    )}
-                </>
-            ) : (
-                <span className="text-xs text-slate-500 font-medium ml-2">Chế độ chỉnh sửa mã nguồn HTML</span>
-            )}
-        </div>
-
-        {/* Editor Area */}
-        <div className="flex-grow bg-white relative overflow-hidden flex flex-col relative">
-            {mode === 'visual' ? (
-                <div
-                    ref={contentRef}
-                    contentEditable
-                    onInput={handleInput}
-                    onPaste={handlePaste}
-                    onClick={handleEditorClick}
-                    onKeyUp={checkLinkStatus}
-                    className="flex-grow p-5 outline-none prose prose-slate max-w-none overflow-y-auto custom-scrollbar 
-                    prose-a:text-blue-600 prose-a:underline prose-a:decoration-blue-300 prose-a:decoration-2 prose-a:underline-offset-2 hover:prose-a:text-blue-800 prose-a:cursor-pointer"
-                    style={{ minHeight: '300px' }}
-                    data-placeholder="Nhập nội dung bài viết hoặc paste từ Word/Docs..."
-                />
-            ) : (
-                <textarea
-                    value={value}
-                    onChange={(e) => onChange(e.target.value)}
-                    className="flex-grow p-4 outline-none font-mono text-sm bg-slate-900 text-green-400 resize-none overflow-y-auto custom-scrollbar"
-                    style={{ minHeight: '300px' }}
-                    placeholder="<p>Nhập mã HTML tại đây...</p>"
-                />
-            )}
-        </div>
-        {mode === 'visual' && (
-             <div className="px-4 py-1 bg-slate-50 border-t border-slate-100 text-[10px] text-slate-400 text-right flex justify-between">
-                <span>Giữ Ctrl + Click để mở link.</span>
-                <span>Hỗ trợ paste từ Word/Docs giữ nguyên Link (href, target, rel), Heading, Ảnh.</span>
-             </div>
-        )}
-    </div>
-  )
-});
-
-// --- Main Input Section ---
-
 const InputSection = forwardRef<InputSectionHandle, Props>(({ data, onChange }, ref) => {
-  const titleRef = useRef<HTMLInputElement>(null);
-  const metaRef = useRef<HTMLTextAreaElement>(null);
-  const keywordRef = useRef<HTMLInputElement>(null);
-  const editorRef = useRef<RichTextHandle>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const analysis = useMemo(() => analyzeContent(data), [data]);
+  const tax = analysis.taxonomy;
+
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState<{enhancedContent: string, suggestions: string[]} | null>(null);
+  const [viewMode, setViewMode] = useState<'original' | 'diff'>('original');
+
+  // Link Popover States
+  const [showLinkModal, setShowLinkModal] = useState(false);
+  const [linkUrl, setLinkUrl] = useState('');
+  const [linkOptions, setLinkOptions] = useState({
+    blank: true,
+    nofollow: false,
+    sponsored: false
+  });
+  const [savedSelection, setSavedSelection] = useState<Range | null>(null);
 
   const handleChange = (field: keyof SEOInput, value: string) => {
     let newData = { ...data, [field]: value };
-    if (field === 'focusKeyword') {
-      newData.slug = generateSlug(value);
-    }
+    if (field === 'focusKeyword' && !data.slug) newData.slug = generateSlug(value);
     onChange(newData);
   };
 
-  useImperativeHandle(ref, () => ({
-    focusField: (id: string) => {
-        if (id === 'key-title' || id === 'ctr-len' || id === 'ctr-power') {
-            titleRef.current?.focus();
-            titleRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            titleRef.current?.classList.add('ring-2', 'ring-red-400');
-            setTimeout(() => titleRef.current?.classList.remove('ring-2', 'ring-red-400'), 1500);
-        } else if (id === 'ctr-meta') {
-            metaRef.current?.focus();
-            metaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } else if (id === 'focus-keyword') {
-            keywordRef.current?.focus();
-            keywordRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } else if (id === 'key-density') {
-             // Handle Density check in Editor now
-             editorRef.current?.findAndHighlight(id);
-        } else {
-            // Scroll to Editor content
-            editorRef.current?.findAndHighlight(id);
-        }
+  useEffect(() => {
+    if (editorRef.current && editorRef.current.innerHTML !== data.content) {
+      if (document.activeElement !== editorRef.current) {
+        editorRef.current.innerHTML = data.content;
+      }
     }
-  }));
+  }, [data.content]);
+
+  const execCommand = (command: string, value: string = '') => {
+    document.execCommand(command, false, value);
+    if (editorRef.current) {
+      handleChange('content', editorRef.current.innerHTML);
+    }
+  };
+
+  // Mở modal gắn link
+  const openLinkModal = () => {
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      setSavedSelection(selection.getRangeAt(0).cloneRange());
+      setShowLinkModal(true);
+      // Reset form
+      setLinkUrl('');
+    } else {
+      alert("Vui lòng bôi đen từ khóa muốn gắn link.");
+    }
+  };
+
+  // Thực hiện gắn link với các thuộc tính SEO
+  const confirmAddLink = () => {
+    if (!linkUrl) return;
+    
+    const selection = window.getSelection();
+    if (savedSelection) {
+      selection?.removeAllRanges();
+      selection?.addRange(savedSelection);
+    }
+
+    // Tạo thẻ A thủ công để gán các thuộc tính SEO
+    const relArr = [];
+    if (linkOptions.nofollow) relArr.push('nofollow');
+    if (linkOptions.sponsored) relArr.push('sponsored');
+    
+    const anchor = document.createElement('a');
+    anchor.href = linkUrl;
+    if (linkOptions.blank) anchor.target = '_blank';
+    if (relArr.length > 0) anchor.rel = relArr.join(' ');
+    anchor.className = "text-blue-600 underline hover:text-blue-800 transition-colors";
+
+    const range = selection?.getRangeAt(0);
+    if (range) {
+      const selectedText = range.extractContents();
+      anchor.appendChild(selectedText);
+      range.insertNode(anchor);
+    }
+
+    if (editorRef.current) {
+      handleChange('content', editorRef.current.innerHTML);
+    }
+    
+    setShowLinkModal(false);
+    setSavedSelection(null);
+  };
+
+  const addImage = () => {
+    const url = window.prompt("Nhập URL hình ảnh:");
+    if (url) execCommand('insertImage', url);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    setTimeout(() => {
+      if (editorRef.current) {
+        handleChange('content', editorRef.current.innerHTML);
+      }
+    }, 0);
+  };
+
+  const handleAIRequest = async () => {
+    if (!data.content || data.content.length < 20) {
+        alert("Vui lòng nhập nội dung để AI có thể phân tích.");
+        return;
+    }
+    setAiLoading(true);
+    const result = await optimizeContent(data, analysis);
+    if (result) {
+        setAiResult(result);
+        setViewMode('diff');
+    }
+    setAiLoading(false);
+  };
+
+  const applyAIContent = () => {
+      if (!aiResult) return;
+      const cleanContent = aiResult.enhancedContent
+        .replace(/<strong style="color: #ef4444;">/g, "")
+        .replace(/<\/strong>/g, "");
+      handleChange('content', cleanContent);
+      setAiResult(null);
+      setViewMode('original');
+  };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-6 h-full overflow-y-auto custom-scrollbar flex flex-col">
-      <h2 className="text-xl font-bold text-slate-800 border-b border-slate-100 pb-4 shrink-0">
-        Nội Dung & Cấu Hình
-      </h2>
+    <div className="flex flex-col h-full overflow-hidden relative">
+      {/* LINK POPOVER (YOAST STYLE) */}
+      {showLinkModal && (
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 z-[100] w-80 bg-white border border-slate-200 shadow-2xl rounded-2xl p-4 animate-in zoom-in-95 duration-200">
+           <div className="flex items-center justify-between mb-3">
+              <h4 className="text-[11px] font-black text-slate-800 uppercase flex items-center gap-2">
+                <LinkIcon size={14} className="text-blue-600"/> Cài đặt liên kết SEO
+              </h4>
+              <button onClick={() => setShowLinkModal(false)} className="text-slate-400 hover:text-slate-600"><X size={16}/></button>
+           </div>
+           
+           <div className="space-y-3">
+              <input 
+                type="text" 
+                placeholder="Dán URL (https://...)" 
+                autoFocus
+                value={linkUrl}
+                onChange={(e) => setLinkUrl(e.target.value)}
+                className="w-full p-2 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              
+              <div className="space-y-2 py-2 border-y border-slate-50">
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input type="checkbox" checked={linkOptions.blank} onChange={e => setLinkOptions({...linkOptions, blank: e.target.checked})} className="rounded text-blue-600" />
+                  <span className="text-[10px] font-bold text-slate-600 group-hover:text-slate-900 flex items-center gap-1.5"><ExternalLink size={12}/> Mở trong tab mới</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input type="checkbox" checked={linkOptions.nofollow} onChange={e => setLinkOptions({...linkOptions, nofollow: e.target.checked})} className="rounded text-blue-600" />
+                  <span className="text-[10px] font-bold text-slate-600 group-hover:text-slate-900 flex items-center gap-1.5"><ShieldCheck size={12}/> Đánh dấu nofollow</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input type="checkbox" checked={linkOptions.sponsored} onChange={e => setLinkOptions({...linkOptions, sponsored: e.target.checked})} className="rounded text-blue-600" />
+                  <span className="text-[10px] font-bold text-slate-600 group-hover:text-slate-900 flex items-center gap-1.5"><DollarSign size={12}/> Liên kết tài trợ (sponsored)</span>
+                </label>
+              </div>
 
-      {/* Focus Keyword */}
-      <div className="space-y-2 shrink-0">
-        <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-          <Tag className="w-4 h-4 text-blue-500" /> Focus Keyword (Từ khóa chính)
-        </label>
-        <input
-          ref={keywordRef}
-          type="text"
-          value={data.focusKeyword}
-          onChange={(e) => handleChange('focusKeyword', e.target.value)}
-          placeholder="Ví dụ: máy lọc không khí"
-          className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all outline-none"
-        />
-      </div>
-
-      {/* Intent */}
-      <div className="space-y-2 shrink-0">
-        <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-          <Type className="w-4 h-4 text-purple-500" /> Loại Bài Viết (Intent)
-        </label>
-        <select
-          value={data.intent}
-          onChange={(e) => handleChange('intent', e.target.value as SearchIntent)}
-          className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
-        >
-          {Object.values(SearchIntent).map((intent) => (
-            <option key={intent} value={intent}>{intent}</option>
-          ))}
-        </select>
-      </div>
-
-      {/* Title & Slug */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 shrink-0">
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-             <Type className="w-4 h-4 text-slate-500" /> SEO Title
-          </label>
-          <input
-            ref={titleRef}
-            type="text"
-            value={data.seoTitle}
-            onChange={(e) => handleChange('seoTitle', e.target.value)}
-            placeholder="Tiêu đề hiển thị trên Google"
-            className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-          />
-          <div className="text-xs text-right text-slate-400">{data.seoTitle.length} / 60 ký tự</div>
+              <button 
+                onClick={confirmAddLink}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-black shadow-lg shadow-blue-500/20 transition-all"
+              >
+                Gắn liên kết
+              </button>
+           </div>
         </div>
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-            <Globe className="w-4 h-4 text-slate-500" /> Slug (URL)
-          </label>
-          <input
-            type="text"
-            value={data.slug}
-            onChange={(e) => handleChange('slug', e.target.value)}
-            placeholder="may-loc-khong-khi"
-            className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50"
-          />
-        </div>
-      </div>
+      )}
 
-      {/* Secondary Keywords */}
-      <div className="space-y-2 shrink-0">
-        <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-          <Hash className="w-4 h-4 text-slate-500" /> Từ khóa phụ (Cách nhau dấu phẩy)
-        </label>
-        <input
-          type="text"
-          value={data.secondaryKeywords}
-          onChange={(e) => handleChange('secondaryKeywords', e.target.value)}
-          placeholder="review máy lọc, máy lọc giá rẻ..."
-          className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-        />
-      </div>
+      <div className="flex-grow overflow-y-auto no-scrollbar p-5 space-y-6">
+          {/* AI AUTO TAXONOMY DISPLAY */}
+          <div className="bg-slate-900 rounded-xl p-4 border border-slate-700 shadow-xl">
+             <div className="flex items-center gap-2 mb-3">
+                <Zap className="w-4 h-4 text-yellow-400 fill-yellow-400" />
+                <h3 className="text-[11px] font-black text-slate-300 uppercase tracking-[0.2em]">Hệ thống Phân loại AI</h3>
+             </div>
+             
+             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                <TaxonomyBadge label="Intent" value={tax.intent} icon={<Target size={12}/>} color="blue" />
+                <TaxonomyBadge label="Loại bài" value={tax.contentType} icon={<Layers size={12}/>} color="purple" />
+                <TaxonomyBadge label="Phễu" value={tax.funnelStage} icon={<Compass size={12}/>} color="orange" />
+                <TaxonomyBadge label="Ngành" value={tax.industry} icon={<Globe size={12}/>} color="green" />
+                <TaxonomyBadge label="Sub-ngành" value={tax.subIndustry} icon={<Tag size={12}/>} color="slate" />
+                <TaxonomyBadge label="Mục tiêu" value={tax.seoGoal} icon={<Zap size={12}/>} color="yellow" />
+             </div>
+          </div>
 
-      {/* Meta Description */}
-      <div className="space-y-2 shrink-0">
-        <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-          <FileText className="w-4 h-4 text-slate-500" /> Meta Description
-        </label>
-        <textarea
-          ref={metaRef}
-          value={data.metaDescription}
-          onChange={(e) => handleChange('metaDescription', e.target.value)}
-          placeholder="Mô tả ngắn gọn, kích thích click..."
-          className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none h-20 resize-none"
-        />
-         <div className="text-xs text-right text-slate-400">{data.metaDescription.length} / 160 ký tự</div>
-      </div>
+          {/* METADATA INPUTS */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-2"><Tag size={12}/> Từ khóa chính</label>
+                <input
+                  type="text" value={data.focusKeyword}
+                  onChange={(e) => handleChange('focusKeyword', e.target.value)}
+                  className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-2"><Globe size={12}/> URL Slug</label>
+                <input
+                  type="text" value={data.slug}
+                  onChange={(e) => handleChange('slug', e.target.value)}
+                  className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-slate-50"
+                />
+              </div>
+          </div>
 
-      {/* Content Editor */}
-      <div className="space-y-2 flex-grow flex flex-col min-h-[400px]">
-        <label className="text-sm font-medium text-slate-700 flex items-center gap-2">
-          <AlignLeft className="w-4 h-4 text-slate-500" /> Nội Dung Bài Viết (Rich Text / HTML)
-        </label>
-        
-        <RichTextEditor 
-            ref={editorRef}
-            value={data.content}
-            onChange={(val) => handleChange('content', val)}
-            focusKeyword={data.focusKeyword}
-        />
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-2"><Type size={12}/> SEO Title</label>
+            <input
+              type="text" value={data.seoTitle}
+              onChange={(e) => handleChange('seoTitle', e.target.value)}
+              className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+          </div>
+
+          {/* RICH TEXT EDITOR */}
+          <div className="space-y-1 flex flex-col min-h-[500px]">
+            <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-2"><AlignLeft size={12}/> Nội dung bài viết (Chấp nhận Link & Ảnh)</label>
+            <div className="flex-grow border border-slate-300 rounded-lg overflow-hidden flex flex-col shadow-inner">
+               <div className="bg-slate-50 border-b border-slate-200 p-2 flex gap-1 flex-wrap items-center">
+                  <button onClick={() => execCommand('bold')} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all" title="In đậm"><Bold size={16}/></button>
+                  <button onClick={() => execCommand('italic')} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all" title="In nghiêng"><Italic size={16}/></button>
+                  <div className="w-px h-4 bg-slate-300 mx-1"></div>
+                  <button onClick={() => execCommand('formatBlock', 'H2')} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all" title="Thẻ H2"><Heading2 size={16}/></button>
+                  <button onClick={() => execCommand('formatBlock', 'H3')} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all" title="Thẻ H3"><Heading3 size={16}/></button>
+                  <div className="w-px h-4 bg-slate-300 mx-1"></div>
+                  <button onClick={openLinkModal} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all text-blue-600" title="Gắn liên kết (Yoast Style)"><LinkIcon size={16}/></button>
+                  <button onClick={addImage} className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all text-purple-600" title="Chèn Hình ảnh"><ImageIcon size={16}/></button>
+               </div>
+               <div 
+                  ref={editorRef}
+                  contentEditable
+                  onInput={(e) => handleChange('content', e.currentTarget.innerHTML)}
+                  onPaste={handlePaste}
+                  className="flex-grow p-5 outline-none font-sans leading-relaxed overflow-y-auto prose prose-blue max-w-none"
+                  style={{ minHeight: '350px' }}
+               />
+            </div>
+          </div>
+
+          {/* AI OPTIMIZER SECTION */}
+          <div className="bg-white border-2 border-blue-100 rounded-2xl p-5 shadow-lg shadow-blue-500/5 space-y-4">
+             <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-blue-600" />
+                    <h2 className="text-sm font-black text-slate-800 uppercase tracking-wide">AI Content Optimizer</h2>
+                </div>
+                {!aiResult ? (
+                    <button 
+                        onClick={handleAIRequest}
+                        disabled={aiLoading}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 transition-all disabled:opacity-50"
+                    >
+                        {aiLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                        {aiLoading ? "Đang phân tích..." : "Tối ưu bằng AI"}
+                    </button>
+                ) : (
+                    <div className="flex bg-slate-100 p-1 rounded-full border border-slate-200">
+                        <button onClick={() => setViewMode('original')} className={`px-3 py-1 rounded-full text-[10px] font-bold flex items-center gap-1 transition-all ${viewMode === 'original' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><History size={12} /> Bài gốc</button>
+                        <button onClick={() => setViewMode('diff')} className={`px-3 py-1 rounded-full text-[10px] font-bold flex items-center gap-1 transition-all ${viewMode === 'diff' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><FileEdit size={12} /> Bản sửa (Diff)</button>
+                    </div>
+                )}
+             </div>
+
+             {aiResult && (
+                 <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+                        <h4 className="text-[10px] font-black text-blue-800 uppercase mb-2">Gợi ý từ chuyên gia SEO:</h4>
+                        <ul className="space-y-1">
+                            {aiResult.suggestions.map((s, i) => (
+                                <li key={i} className="text-[11px] text-blue-700 flex items-start gap-2">
+                                    <span className="mt-1 flex-shrink-0 w-1 h-1 rounded-full bg-blue-400"></span>
+                                    {s}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                    <div className="relative border border-slate-200 rounded-xl overflow-hidden bg-slate-50">
+                        <div className="max-h-[300px] overflow-y-auto p-4 text-sm font-sans leading-relaxed prose prose-slate">
+                            {viewMode === 'original' ? <div dangerouslySetInnerHTML={{ __html: data.content }} /> : <div dangerouslySetInnerHTML={{ __html: aiResult.enhancedContent }} />}
+                        </div>
+                        <div className="absolute top-2 right-2 flex gap-1">
+                            <button onClick={applyAIContent} className="bg-green-600 hover:bg-green-700 text-white p-2 rounded-lg shadow-lg flex items-center gap-2 text-xs font-bold transition-all"><Check size={14} /> Chấp nhận</button>
+                            <button onClick={() => setAiResult(null)} className="bg-white border border-slate-200 p-2 rounded-lg text-slate-500 hover:bg-slate-50 shadow-sm transition-all"><Copy size={14} /></button>
+                        </div>
+                    </div>
+                 </div>
+             )}
+          </div>
       </div>
     </div>
   );
 });
+
+const TaxonomyBadge = ({ label, value, icon, color }: { label: string, value: string, icon: any, color: string }) => {
+  const colors: any = {
+    blue: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+    purple: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
+    orange: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+    green: 'bg-green-500/10 text-green-400 border-green-500/20',
+    slate: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
+    yellow: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+  };
+  return (
+    <div className={`flex flex-col p-2 rounded-lg border ${colors[color]} gap-1`}>
+      <span className="text-[8px] font-bold uppercase opacity-60 flex items-center gap-1">{icon} {label}</span>
+      <span className="text-[10px] font-black truncate">{value}</span>
+    </div>
+  );
+};
 
 export default InputSection;

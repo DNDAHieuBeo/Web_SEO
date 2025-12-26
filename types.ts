@@ -1,18 +1,28 @@
+
 export enum SearchIntent {
   INFORMATIONAL = 'Informational',
-  COMMERCIAL = 'Commercial',
+  COMMERCIAL = 'Commercial Investigation',
   TRANSACTIONAL = 'Transactional',
-  LOCAL = 'Local SEO',
+  NAVIGATIONAL = 'Navigational',
+}
+
+export interface ContentTaxonomy {
+  intent: SearchIntent;
+  contentType: string;
+  funnelStage: 'TOFU' | 'MOFU' | 'BOFU';
+  industry: string;
+  subIndustry: string;
+  seoGoal: 'Traffic' | 'Conversion' | 'Brand / Trust';
 }
 
 export interface SEOInput {
   focusKeyword: string;
-  secondaryKeywords: string; // Comma separated
+  secondaryKeywords: string;
   seoTitle: string;
   slug: string;
   metaDescription: string;
   content: string;
-  intent: SearchIntent;
+  intent: SearchIntent; // For manual override if needed, but we'll prioritize auto
 }
 
 export enum Impact {
@@ -25,7 +35,7 @@ export interface AuditItem {
   id: string;
   label: string;
   passed: boolean;
-  score: number; // 0-100 contribution
+  score: number;
   message: string;
   impact: Impact;
   category: 'intent' | 'onpage' | 'eeat' | 'ctr' | 'readability';
@@ -34,13 +44,14 @@ export interface AuditItem {
 export interface AnalysisResult {
   totalScore: number;
   breakdown: {
-    intent: number; // 30%
-    onPage: number; // 25%
-    eeat: number; // 20%
-    ctr: number; // 15%
-    readability: number; // 10%
+    intent: number;
+    onPage: number;
+    eeat: number;
+    ctr: number;
+    readability: number;
   };
   auditItems: AuditItem[];
   priorityFixes: AuditItem[];
   faqSuggestions: string[];
+  taxonomy: ContentTaxonomy; // New field for auto-detected labels
 }
